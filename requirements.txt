@@ -1,4 +1,4 @@
-Flask
+flask
 flask-cors
-airtable-python-wrapper
 selenium
+airtable-python-wrapper
