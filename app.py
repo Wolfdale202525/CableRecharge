@@ -1,85 +1,136 @@
-from flask import Flask
-from flask_cors import CORS
-
-app = Flask(__name__)
-CORS(app, origins=["https://cablerechargeform.netlify.app"])
-
-import os
-import hmac
-import hashlib
-import requests
 from flask import Flask, request, jsonify
-from airtable import Airtable
-from recharge_bot import run_recharge
-
-# Load config from env
-API_KEY      = os.environ['INSTAMOJO_API_KEY']
-AUTH_TOKEN   = os.environ['INSTAMOJO_AUTH_TOKEN']
-REDIRECT_URL = os.environ['INSTAMOJO_REDIRECT_URL']
-WEBHOOK_URL  = os.environ['WEBHOOK_URL']
-AIRTABLE_KEY = os.environ['AIRTABLE_KEY']
-BASE_ID      = os.environ['BASE_ID']
-SUB_TABLE    = 'Subscribers'
-
-# Airtable client
-at = Airtable(BASE_ID, SUB_TABLE, api_key=AIRTABLE_KEY)
+from flask_cors import CORS
+import json
+import os
+import airtable
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+import time
 
 app = Flask(__name__)
 
-# 1) Endpoint to create Instamojo payment
-@app.route('/create-payment', methods=['POST'])
+# ✅ CORS configuration: allow only Netlify site
+CORS(app, resources={r"/*": {"origins": "https://cablerechargeform.netlify.app"}})
+
+# ✅ Optional full CORS headers for preflight
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    response.headers.add('Access-Control-Allow-Origin', 'https://cablerechargeform.netlify.app')
+    return response
+
+# ✅ Airtable setup
+AIRTABLE_API_KEY = "patzFXVI0367ndg5p.2d59007035e59da5958f2e4c3534cc8353c99094ab3f980b10a6af8d0ef981a8"
+BASE_ID = "appXQfqf590MkjfHK"
+SUBSCRIBER_TABLE = "Subscriber List"
+PACKAGE_TABLE = "Package List"
+
+at = airtable.Airtable(BASE_ID, AIRTABLE_API_KEY)
+
+# ✅ Dummy/fake payment route (simulates success)
+@app.route("/create-payment", methods=["POST"])
 def create_payment():
-    data = request.get_json()
-    last5        = data['last5']
-    package_name = data['packageName']
-    amount       = data['amount']
+    data = request.json
+    last5 = data.get("last5")
+    package_name = data.get("packageName")
 
-    payload = {
-        'purpose': last5,           # we'll match by this in webhook
-        'amount': amount,
-        'buyer_name': '',
-        'redirect_url': REDIRECT_URL,
-        'webhook': WEBHOOK_URL,
-        'allow_repeated_payments': False
-    }
+    if not last5 or not package_name:
+        return jsonify({"success": False, "message": "Missing parameters"}), 400
 
-    resp = requests.post(
-        'https://test.instamojo.com/api/1.1/payment-requests/',
-        data=payload,
-        auth=(API_KEY, AUTH_TOKEN)
-    )
-    resp.raise_for_status()
-    payment = resp.json()['payment_request']
-    return jsonify({ 'payment_url': payment['longurl'] })
+    # Find full smartcard number
+    records = at.get(SUBSCRIBER_TABLE).get("records", [])
+    full_smartcard = None
+    customer_name = ""
 
-# 2) Instamojo Webhook handler
-@app.route('/instamojo-webhook', methods=['POST'])
-def instamojo_webhook():
-    # Verify HMAC-SHA1 signature
-    sig = request.headers.get('X-Instamojo-Signature', '')
-    body = request.get_data()
-    computed = hmac.new(AUTH_TOKEN.encode(), body, hashlib.sha1).hexdigest()
-    if not hmac.compare_digest(sig, computed):
-        return ("Invalid signature", 403)
+    for rec in records:
+        smartcard = rec["fields"].get("Smartcard")
+        if smartcard and smartcard[-5:] == last5:
+            full_smartcard = smartcard
+            customer_name = rec["fields"].get("Name", "")
+            break
 
-    form = request.form
-    last5     = form.get('purpose')         # we set purpose=last5
-    status    = form.get('status')          # "Completed" or "Failed"
-    package   = form.get('purpose')         # if you need packageName you can extend payload
-    # Lookup subscriber
-    records = at.get_all(formula=f"{{last5}} = '{last5}'")
-    if not records:
-        return ("Subscriber not found", 404)
-    rec = records[0]
-    rec_id     = rec['id']
-    full_card  = rec['fields']['Smartcard']
+    if not full_smartcard:
+        return jsonify({"success": False, "message": "Smartcard not found"}), 404
 
-    # Mark Pending → run recharge → update final status
-    at.update(rec_id, { 'Status': 'Pending' })
-    success = (status.lower() == 'completed') and run_recharge(full_card, package, plan_option="1 month")
-    at.update(rec_id, { 'Status': 'Success' if success else 'Failed' })
+    # Find package price
+    packages = at.get(PACKAGE_TABLE).get("records", [])
+    plan_type = ""
+    for pkg in packages:
+        if pkg["fields"].get("Package Name") == package_name:
+            plan_type = pkg["fields"].get("Plan Type", "1 Month")
+            break
 
-    return ("OK", 200)
+    # Simulate recharge
+    try:
+        do_recharge(full_smartcard, package_name, plan_type)
+        return jsonify({
+            "success": True,
+            "message": f"Recharge successful for {customer_name} ({full_smartcard})"
+        })
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+# ✅ Recharge logic using Selenium
+def do_recharge(smartcard_number, package_name, plan_type):
+    url = "http://yashcableservices.ridsys.in:8080/RSMSOPERATOR/faces/index.xhtml"
+    username = "momaicable"
+    password = "123456"
+
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+
+    driver = webdriver.Chrome(options=chrome_options)
+
+    driver.get(url)
+    time.sleep(2)
+
+    # Login
+    driver.find_element(By.XPATH, '//*[@id="j_idt6:j_idt8"]').send_keys(username)
+    driver.find_element(By.XPATH, '//*[@id="j_idt6:j_idt10"]').send_keys(password)
+    driver.find_element(By.XPATH, '//*[@id="j_idt6:j_idt12"]').click()
+    time.sleep(3)
+
+    # Search smartcard
+    search_input = driver.find_element(By.XPATH, '//*[@id="hform:sform:smartcard_input"]')
+    search_input.send_keys(smartcard_number)
+    time.sleep(2)
+    search_input.send_keys('\ue007')  # Press Enter
+    time.sleep(3)
+
+    # Recharge Type dropdown
+    driver.find_element(By.XPATH, '//*[@id="form:acpanel:type_label"]').click()
+    time.sleep(1)
+    driver.find_element(By.XPATH, f"//li[.='PLAN']").click()
+    time.sleep(1)
+
+    # Package Plan dropdown
+    driver.find_element(By.XPATH, '//*[@id="form:acpanel:plan_id_label"]').click()
+    time.sleep(1)
+    driver.find_element(By.XPATH, f"//li[.='{plan_type}']").click()
+    time.sleep(1)
+
+    # Confirm & Recharge
+    driver.find_element(By.XPATH, '//*[@id="form:acpanel:j_idt189"]').click()
+    time.sleep(1)
+    driver.find_element(By.XPATH, '//*[@id="form:acpanel:j_idt190"]').click()
+    time.sleep(3)
+
+    # Check for success
+    success_msg = driver.find_element(By.XPATH, '//*[@id="form:msgs_container"]').text
+    if "success" not in success_msg.lower():
+        raise Exception("Recharge may have failed or message not shown.")
+
+    driver.quit()
+
+# ✅ Health check
+@app.route("/")
+def health():
+    return "Cable Recharge Backend Running"
+
+# ✅ Start server
+if __name__ == "__main__":
+    app.run(debug=True)
