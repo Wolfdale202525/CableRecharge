@@ -22,12 +22,15 @@ def after_request(response):
     return response
 
 # ✅ Airtable setup
+from airtable import Airtable  # Make sure this is at the top
+
 AIRTABLE_API_KEY = "patzFXVI0367ndg5p.2d59007035e59da5958f2e4c3534cc8353c99094ab3f980b10a6af8d0ef981a8"
 BASE_ID = "appXQfqf590MkjfHK"
 SUBSCRIBER_TABLE = "Subscriber List"
 PACKAGE_TABLE = "Package List"
 
-at = airtable.Airtable(BASE_ID, AIRTABLE_API_KEY)
+at_subscribers = Airtable(BASE_ID, SUBSCRIBER_TABLE, AIRTABLE_API_KEY)
+at_packages = Airtable(BASE_ID, PACKAGE_TABLE, AIRTABLE_API_KEY)
 
 # ✅ Dummy/fake payment route (simulates success)
 @app.route("/create-payment", methods=["POST"])
